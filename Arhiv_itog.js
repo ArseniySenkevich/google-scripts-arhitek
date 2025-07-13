@@ -1,5 +1,5 @@
 /**********************************************************************
-* Telegram Bot — Архивирование и Выгрузка (финальная версия)
+* Telegram Bot — Архивирование и Выгрузка (переработано под текстовые команды)
 **********************************************************************/
 
 const SHEETS_TO_ARCHIVE = {
@@ -22,169 +22,199 @@ function getTodayISO() {
   return Utilities.formatDate(new Date(), 'GMT+3', 'yyyy-MM-dd');
 }
 
-// ——— Кнопка Архивации ———
-function handleArchiveRequest(chatId) {
-  const keyboard = {
-    inline_keyboard: [
-      [
-        { text: '✅ Архивировать', callback_data: 'CONFIRM_ARCHIVE' },
-        { text: '❌ Отмена', callback_data: 'CANCEL_ARCHIVE' }
-      ]
-    ]
-  };
-
-  sendMessage(chatId,
-    '⚠️ Вы уверены, что хотите заархивировать данные?\n\n' +
-    'Будет выполнено:\n— Перенос всех строк из рабочих листов:\n' +
-    Object.keys(SHEETS_TO_ARCHIVE).map(n => '📌 ' + n).join('\n') +
-    '\nв архивные листы с датой (если уже есть — перезапишется).\n— Очистка рабочих листов.\n— Создание Excel-файла.',
-    keyboard
-  );
+function getTodayRU() {
+  return Utilities.formatDate(new Date(), 'GMT+3', 'dd.MM.yyyy');
 }
 
-// ——— Подтверждение Архивации ———
-function handleArchiveConfirm(chatId) {
-  archiveAndReport();
-  const link = createExcelWithTodayArchives();
-  sendMessage(chatId, `✅ Архивирование завершено.\n📁 <a href="${link}">Скачать отчёт</a>`, null);
+function getNow() {
+  return Utilities.formatDate(new Date(), 'GMT+3', 'yyyy-MM-dd HH:mm:ss');
 }
 
-// ——— Автоматическое выполнение ночью ———
-function nightlyArchiveRun() {
-  archiveAndReport();
-}
+function handleArchiveCallback(action, chatId, userId) {
+  if (!hasArchiveAccess(userId)) {
+    sendMessage(chatId, '⛔ У вас нет доступа к архивированию.');
+    return;
+  }
 
-// ——— Основной Архиватор с перезаписью ———
-function archiveAndReport() {
-  const dateStr = getTodayISO();
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-
-  Object.entries(SHEETS_TO_ARCHIVE).forEach(([sourceName, archiveName]) => {
-    const sheet = ss.getSheetByName(sourceName);
-    if (!sheet) return;
-
-    const data = sheet.getDataRange().getValues();
-    if (data.length < 2) return;
-
-    let archiveSheet = ss.getSheetByName(archiveName);
-    if (!archiveSheet) archiveSheet = ss.insertSheet(archiveName);
-
-    const archiveData = archiveSheet.getDataRange().getValues();
-    const reportLabel = `Отчёт от ${dateStr}`;
-
-    // Удалим старый блок с этой датой
-    let startRow = -1;
-    for (let i = 0; i < archiveData.length; i++) {
-      if (archiveData[i][0] === reportLabel) {
-        startRow = i;
-        break;
-      }
+  const clear = action === 'ARCHIVE_AND_CLEAR';
+  try {
+    archiveAndReport(clear);  // теперь принимает параметр — очищать или нет
+    const link = createExcelWithTodayArchives();
+    const text = clear
+      ? `✅ Архивирование завершено с очисткой.\n📁 <a href="${link}">Скачать отчёт</a>`
+      : `✅ Выгрузка завершена (без очистки).\n📁 <a href="${link}">Скачать отчёт</a>`;
+    sendMessage(chatId, text);
+  } catch (e) {
+    const logSheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName('ЛогОшибок');
+    if (logSheet) {
+      logSheet.appendRow([getNow(), 'handleArchiveCallback', `❌ Ошибка при архивации/выгрузке: ${e.message}`, userId]);
     }
+    sendMessage(chatId, `⚠️ Произошла ошибка при формировании Excel-файла.\nПричина: ${e.message}`);
+  }
+}
 
-    if (startRow !== -1) {
-      // Найдём конец блока
-      let endRow = archiveData.length;
-      for (let i = startRow + 1; i < archiveData.length; i++) {
-        if (String(archiveData[i][0]).startsWith('Отчёт от')) {
-          endRow = i;
-          break;
+
+
+
+function archiveAndReport(clearSource = true) {
+  const dateRu = getTodayRU();
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const logSheet = ss.getSheetByName('ЛогОшибок');
+
+  Object.entries(SHEETS_TO_ARCHIVE).forEach(([srcName, arcName]) => {
+    try {
+      const srcSheet = ss.getSheetByName(srcName);
+      if (!srcSheet) return;
+
+      const data = srcSheet.getDataRange().getValues();
+      if (data.length < 2) return;
+
+      let arcSheet = ss.getSheetByName(arcName);
+      if (!arcSheet) arcSheet = ss.insertSheet(arcName);
+
+      const label = `Отчёт от ${dateRu}`;
+      const archiveData = arcSheet.getDataRange().getValues();
+      const existingLabelRow = archiveData.findIndex(row => String(row[0]).trim() === label);
+
+      if (clearSource) {
+        // Удаляем старый блок архива за этот день, если есть
+        if (existingLabelRow >= 0) {
+          let endRow = existingLabelRow + 1;
+          while (endRow < archiveData.length && !String(archiveData[endRow][0]).startsWith('Отчёт от')) {
+            endRow++;
+          }
+          arcSheet.deleteRows(existingLabelRow + 1, endRow - existingLabelRow - 1);
+          arcSheet.deleteRow(existingLabelRow + 1); // сам заголовок
+          SpreadsheetApp.flush();
+        }
+      } else {
+        // Только выгрузка: если уже выгружали, то не дублируем
+        if (existingLabelRow >= 0) {
+          logSheet?.appendRow([getNow(), arcName, `⚠️ Пропущен: отчёт за ${dateRu} уже существует`, Session.getActiveUser().getEmail()]);
+          return;
         }
       }
-      const numRows = endRow - startRow;
-      archiveSheet.deleteRows(startRow + 1, numRows); // +1 потому что index 0-based
+
+      const insertRow = arcSheet.getLastRow() + 2;
+      arcSheet.getRange(insertRow, 1).setValue(label);
+      arcSheet.getRange(insertRow + 1, 1, data.length, data[0].length).setValues(data);
+
+      try {
+        const range = arcSheet.getRange(insertRow + 1, 1, data.length);
+        range.shiftRowGroupDepth(1);
+        arcSheet.getRowGroup(insertRow + 1, 1)?.collapse();
+      } catch (e) {
+        logSheet?.appendRow([getNow(), arcName, `⚠️ Ошибка при группировке: ${e.message}`, Session.getActiveUser().getEmail()]);
+      }
+
+      // Очищаем рабочие листы, если clearSource = true
+      if (clearSource && srcSheet.getLastRow() > 1) {
+        const numCols = srcSheet.getLastColumn();
+        srcSheet.getRange(2, 1, srcSheet.getLastRow() - 1, numCols).clearContent();
+      }
+
+    } catch (e) {
+      logSheet?.appendRow([getNow(), arcName, `❌ Ошибка при архивации: ${e.message}`, Session.getActiveUser().getEmail()]);
     }
-
-    // Вставим новый блок
-    const insertRow = archiveSheet.getLastRow() + 2;
-    archiveSheet.getRange(insertRow, 1).setValue(reportLabel);
-    archiveSheet.getRange(insertRow + 1, 1, data.length, data[0].length).setValues(data);
-
-    archiveSheet.getRange(insertRow + 1, 1, data.length, 1).shiftRowGroupDepth(1);
-    archiveSheet.getRowGroup(insertRow + 1, 1).collapse();
-
-    // Очистка рабочих листов (кроме шапки)
-    sheet.deleteRows(2, sheet.getLastRow() - 1);
   });
 
   SpreadsheetApp.flush();
 }
 
-// ——— Выгрузка Excel за сегодня ———
+
+
 function createExcelWithTodayArchives() {
-  return createExcelWithDate(getTodayISO());
+  return createExcelWithDate(getTodayRU());
 }
 
-// ——— Выгрузка Excel за любую дату ———
 function createExcelWithDate(dateStr) {
+  Logger.log(`▶️ createExcelWithDate() с датой: ${dateStr}`);
   const source = SpreadsheetApp.openById(SPREADSHEET_ID);
   const temp = SpreadsheetApp.create(`Архивы за ${dateStr}`);
+  const log = source.getSheetByName('ЛогОшибок');
+  const isoDate = dateStr.replace(/(\d{2})\.(\d{2})\.(\d{4})/, '$3-$2-$1');
+  let sheetCount = 0;
 
-  Object.values(SHEETS_TO_ARCHIVE).forEach(archiveName => {
-    const sheet = source.getSheetByName(archiveName);
-    if (!sheet) return;
-
-    const data = sheet.getDataRange().getValues();
-    let startIndex = -1;
-
-    for (let i = 0; i < data.length; i++) {
-      if (data[i][0] === `Отчёт от ${dateStr}`) {
-        startIndex = i + 1;
-        break;
-      }
+  Object.values(SHEETS_TO_ARCHIVE).forEach(name => {
+    const sh = source.getSheetByName(name);
+    Logger.log(`🔍 Проверяем лист ${name}...`);
+    if (!sh) {
+      if (log) log.appendRow([getNow(), name, '⚠️ Лист не найден', Session.getActiveUser().getEmail()]);
+      return;
     }
-
-    if (startIndex === -1) return;
-
-    const values = [];
-    for (let i = startIndex; i < data.length; i++) {
-      if (String(data[i][0]).startsWith('Отчёт от')) break;
-      values.push(data[i]);
+    const values = sh.getDataRange().getValues();
+    const headerLine = values.findIndex(r => {
+      const c = String(r[0]).trim();
+      return c === `Отчёт от ${dateStr}` || c === `Отчёт от ${isoDate}`;
+    });
+    if (headerLine < 0) {
+      if (log) log.appendRow([getNow(), name, '❌ Заголовок не найден', Session.getActiveUser().getEmail()]);
+      return;
     }
-
-    if (values.length > 0) {
-      const tempSheet = temp.insertSheet(archiveName.replace('Архив_', ''));
-      tempSheet.getRange(1, 1, values.length, values[0].length).setValues(values);
+    const rows = values.slice(headerLine + 1).filter(r => {
+      const c = String(r[0]).trim();
+      return c && !c.startsWith('Отчёт от');
+    });
+    Logger.log(`${name}: rows=${rows.length}`);
+    if (!rows.length) {
+      if (log) log.appendRow([getNow(), name, '⚠️ Нет данных', Session.getActiveUser().getEmail()]);
+      return;
     }
+    const tmp = temp.insertSheet(name.replace('Архив_', ''));
+    tmp.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+    sheetCount++;
   });
 
-  const defaultSheet = temp.getSheetByName('Лист1');
-  if (defaultSheet) temp.deleteSheet(defaultSheet);
+  if (sheetCount === 0) {
+    if (log) log.appendRow([getNow(), '-', `❌ Ни одного отчёта за ${dateStr}`, Session.getActiveUser().getEmail()]);
+    throw new Error('Архив за эту дату не найден');
+  }
 
-  const blob = temp.getBlob().getAs('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  const file = DriveApp.createFile(blob).setName(`Архивы за ${dateStr}.xlsx`);
+  // Удаляем лишний лист, если он имеется
+  temp.getSheets().forEach(s => {
+    if (s.getName() === 'Лист1' || s.getName() === 'Sheet1') temp.deleteSheet(s);
+  });
+
+  // 🆕 РН: экспортим книгу целиком через UrlFetch
+  const exportUrl = `https://docs.google.com/spreadsheets/d/${temp.getId()}/export?format=xlsx`;
+  const blob = UrlFetchApp.fetch(exportUrl, {
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }
+  }).getBlob().setName(`Архивы за ${dateStr}.xlsx`);
+  const file = DriveApp.createFile(blob);
   file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-
   return file.getUrl();
 }
 
+
+
 function handleReportRequest(chatId, userId, userText) {
-
   const props = PropertiesService.getScriptProperties();
-
-  // 🛡 Игнорируем команды Telegram
   if (userText.startsWith('/')) return false;
-  // если пользователь уже вводит дату
+
   if (props.getProperty('awaiting_report_date_' + userId) === 'true') {
     props.deleteProperty('awaiting_report_date_' + userId);
-    const match = userText.trim().match(/^(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{4})$/);
+    const match = userText.trim().match(/^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})$/);
     if (!match) {
       sendMessage(chatId, '⛔ Неверный формат даты. Пример: 09.07.2025');
       return true;
     }
 
     const [ , dd, mm, yyyy ] = match;
-    const isoDate = `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+    const ruDate = `${String(dd).padStart(2, '0')}.${String(mm).padStart(2, '0')}.${yyyy}`;
 
     try {
-      const link = createExcelWithDate(isoDate);
+      const link = createExcelWithDate(ruDate);
       sendMessage(chatId, `✅ Отчёт за ${dd}.${mm}.${yyyy} сформирован:\n📁 <a href="${link}">Скачать Excel</a>`);
     } catch (e) {
+      const logSheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName('ЛогОшибок');
+      if (logSheet) {
+        logSheet.appendRow([getNow(), 'handleReportRequest', `❌ Ошибка при формировании файла: ${e.message}`, userId]);
+      }
       sendMessage(chatId, `❌ Не удалось сформировать выгрузку. Возможно, отчёт за эту дату не найден.`);
     }
     return true;
   }
 
-  // если пользователь только начал выгрузку
   if (userText.toLowerCase().includes('выгрузка отчёта')) {
     if (!hasArchiveAccess(userId)) {
       sendMessage(chatId, '⛔ У вас нет доступа к выгрузке отчётов.');
@@ -197,5 +227,3 @@ function handleReportRequest(chatId, userId, userText) {
 
   return false;
 }
-
-

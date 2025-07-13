@@ -27,7 +27,6 @@ const RESTRICTED_USERS = {
 };
 
 
-
 const REGION_MAP = (() => {
   const list = ["Краснодар", "Анапа", "Туапсе", "Геленджик", "Новороссийск", "побережье Краснодарского края", "Сочи", "Краснодарский край, другие города", "Ростов и Ростовская область", "Ставрополь", "Кисловодск", "Ставропольский край (другие города)", "Москва и Московская область", "Крым", "Курск", "Белгород", "Липецк", "Калуга", "Сергиев Посад", "Самара", "Астрахань", "Казань", "Санкт-Петербург", "Иваново", "Рязань", "Новочеркасск", "Батайск", "Славинск-на-Кубани", "Махачкала", "Дагестан", "Чечня", "Воронеж", "Нижний Новгород", "Саратов", "Брянск", "Тамбов", "Владимир", "Старый Оскол", "ДНР", "ЛНР", "Пермь", "Другие регионы"];
   const map = {};
@@ -118,7 +117,26 @@ function doPost(e) {
 
   answerCallbackQuery(callbackId);
 
-  
+  if (['ARCHIVE_AND_CLEAR', 'ARCHIVE_NO_CLEAR'].includes(action)) {
+    handleArchiveCallback(action, chatId, userId);
+    return;
+  }
+  if (action === 'ARCHIVE_CONFIRM_CLEAR') {
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: '✅ Подтвердить очистку и завершить день', callback_data: 'ARCHIVE_AND_CLEAR' }],
+      [{ text: '❌ Отмена', callback_data: 'ARCHIVE_CANCEL' }]
+    ]
+  };
+  sendMessage(chatId, '❗ Подтвердите завершение дня.\nВсе рабочие таблицы будут очищены. Убедитесь, что данные больше не нужны.', keyboard);
+  return;
+}
+
+if (action === 'ARCHIVE_CANCEL') {
+  sendMessage(chatId, '❎ Завершение дня отменено.');
+  return;
+}
+
   const statusMap = {
   STATUS_OFFICE: "В офисе",
   STATUS_SITE: "На объекте",
@@ -126,7 +144,7 @@ function doPost(e) {
   STATUS_VACATION: "Отпуск / Больничный / Отгул"
 };
 
-if (action === 'CONFIRM_ARCHIVE') {
+if (action === 'ARCHIVE_ACCESS') {
     if (hasArchiveAccess(userId)) {
       handleArchiveConfirm(chatId);
     } else {
@@ -135,7 +153,7 @@ if (action === 'CONFIRM_ARCHIVE') {
     return;
   }
 
-  if (action === 'CANCEL_ARCHIVE') {
+  if (action === 'ARCHIVE_ACCESS') {
     sendMessage(chatId, '❎ Архивирование отменено.');
     return;
   }
@@ -187,7 +205,7 @@ if (statusMap[action]) {
 }
 
   if (action === 'CONFIRM_ARCHIVE') {
-    if (userId in ALLOWED_ADMINS) {
+    if (userId in ARCHIVE_ACCESS) {
       handleArchiveConfirm(chatId);
     } else {
       sendMessage(chatId, '⛔ У вас нет прав для архивирования.');
@@ -195,18 +213,19 @@ if (statusMap[action]) {
     return;
   }
 
-  if (action === 'CANCEL_ARCHIVE') {
+  if (action === 'ARCHIVE_ACCESS') {
     sendMessage(chatId, '❎ Архивирование отменено.');
     return;
   }
 
   if (action.startsWith('REG_')) {
-    const region = REGION_MAP[action] || 'Неизвестный регион';
-    props.setProperty('assign_region', region);
-    props.setProperty('assign_step', 'city');
-    sendMessage(chatId, `✅ Регион выбран: <b>${region}</b>\n🏙 Укажите город / населённый пункт:`);
-    return;
-  }
+  const region = REGION_MAP[action] || 'Неизвестный регион';
+  props.setProperty('assign_region', region);
+  props.setProperty('assign_step', 'city');
+  sendMessage(chatId, `✅ Регион выбран: <b>${region}</b>\n🏙 Укажите город / населённый пункт:`);
+  return;
+}
+
    answerCallbackQuery(callbackId);
 }
 
@@ -214,14 +233,40 @@ if (statusMap[action]) {
     const userId = data.message.from.id;
     const userText = data.message.text.trim();
     const chatId = data.message.chat.id;
-
+    const assignStep = props.getProperty('assign_step');
     Logger.log('📩 userText: ' + userText);
+
 
   if (handleReportRequest(chatId, userId, userText)) return;
 
   if (userText.startsWith('/start')) {
   Logger.log(`🆔 /start от ${userId} (${ALLOWED_USERS[userId] || 'неизвестный'})`);
-  showReplyKeyboard(chatId, userId in ALLOWED_ADMINS);
+
+  if (userId in ALLOWED_USERS) {
+    const name = ALLOWED_USERS[userId];
+    const welcomeText =
+      `👋 Привет, ${name}!\n\n` +
+      `Этот бот — ваш рабочий инструмент для управления лидами:\n` +
+      `📍 Указывайте утренний статус\n📤 Передавайте заявки менеджерам\n🔁 Возвращайте лиды в колл-центр\n🗂 Делайте архивы и выгрузки (если есть доступ)\n\n` +
+      `Нажмите нужную кнопку ниже 👇`;
+
+    sendMessage(chatId, welcomeText);
+    showReplyKeyboard(chatId, userId in ALLOWED_USERS);
+  } else {
+    const contactId = 420111780; // 👈 сюда ваш Telegram ID
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '📩 Запросить доступ', url: `https://t.me/${contactId}?start=access_request_${userId}` }]
+      ]
+    };
+
+    sendMessage(chatId,
+      `⛔ У вас пока нет доступа к боту.\n` +
+      `Нажмите кнопку ниже, чтобы отправить запрос администратору.`,
+      keyboard
+    );
+  }
+
   return;
 }
 
@@ -333,7 +378,7 @@ if (props.getProperty('awaiting_comment_only_' + userId)) {
     const status = props.getProperty('status_' + userId);
     const location = props.getProperty('location_' + userId);
     const awaitingComment = props.getProperty('awaiting_comment_' + userId);
-    const assignStep = props.getProperty('assign_step');
+    
 
     if (userText.includes('Указать утренний статус')) {
       showStatusButtons(chatId);
@@ -346,6 +391,7 @@ if (userText.includes('Передать лида менеджеру')) {
     sendMessage(chatId, '⛔ У вас нет доступа к передаче менеджеров.');
     return;
   }
+
   props.setProperty('assign_step', 'region');
   showRegionKeyboard(chatId);
   return;
@@ -384,32 +430,44 @@ if (userText.includes('Вернуть лид в колл-центр')) {
   return;
 }
 
-    if (userText.toLowerCase().includes('архивировать')) {
-  if (hasArchiveAccess(userId)) {
-    handleArchiveRequest(chatId);
+    if (userText === '🗂 Архивировать данные' || userText.toLowerCase().includes('архивировать')) {
+    if (hasArchiveAccess(userId)) {
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '📦 Завершить день (с очисткой)', callback_data: 'ARCHIVE_CONFIRM_CLEAR' },
+          { text: '📋 Только выгрузка (без очистки)', callback_data: 'ARCHIVE_NO_CLEAR' }
+        ]
+      ]
+    };
+    sendMessage(chatId,
+      '⚠️ <b>Внимание!</b>\nЕсли вы выберете "Завершить день", все рабочие листы будут <b>очищены</b> после выгрузки данных!\n' +
+      'Это действие <b>необратимо</b>.\n\n📁 Выберите режим архивации:',
+      keyboard
+    );
   } else {
-    sendMessage(chatId, '⛔ У вас нет доступа к архивированию.');
+    sendMessage(chatId, '⛔ У вас нет прав для архивирования.');
   }
   return;
 }
 
-if (handleReportRequest(chatId, userId, userText)) return;
+if (assignStep === 'city') {
+  props.setProperty('assign_city', userText);
+  props.setProperty('assign_step', 'type');
 
+  const typeHelp = `
+🏗 Укажите вид объекта (0, 1, 2, 3, 4):
 
-    if (assignStep === 'region') {
-      props.setProperty('assign_region', userText);
-      props.setProperty('assign_step', 'city');
-      sendMessage(chatId, '🏙 Укажите город / населённый пункт:');
-      return;
-    }
+<b>0</b> — клиент не предоставляет информацию, хочет встретиться лично или посмотреть образцы.  
+<b>1</b> — дом 1 этаж или сумма заказа до 100 000 ₽  
+<b>2</b> — дом 2 этажа или сумма заказа до 200 000 ₽  
+<b>3</b> — дом 3 этажа или сумма заказа свыше 200 000 ₽  
+<b>4</b> — гостиница, отель, административное, общественное или высотное здание.`;
 
-    if (assignStep === 'city') {
-      props.setProperty('assign_city', userText);
-      props.setProperty('assign_step', 'type');
-      sendMessage(chatId, '🏗 Укажите вид объекта (0, 1, 2, 3, 4):');
-      return;
-    }
-    
+  sendMessage(chatId, typeHelp);
+  return;
+}
+
 
 if (assignStep === 'type') {
   const validTypes = ['0', '1', '2', '3', '4'];
@@ -418,9 +476,17 @@ if (assignStep === 'type') {
     return;
   }
 
+  const typeDescriptions = {
+    '0': 'Вид 0 — клиент не предоставляет информацию, хочет встретиться лично или посмотреть образцы. Нет понимания объёма или размера дома.',
+    '1': 'Вид 1 — дом 1 этаж или сумма заказа до 100 000 ₽.',
+    '2': 'Вид 2 — дом 2 этажа или сумма заказа до 200 000 ₽.',
+    '3': 'Вид 3 — дом 3 этажа или сумма заказа свыше 200 000 ₽.',
+    '4': 'Вид 4 — гостиница, отель, административное, общественное или высотное здание.'
+  };
+
   props.setProperty('assign_type', userText);
   props.setProperty('assign_step', 'lead_id');
-  sendMessage(chatId, '🔢 Введите ID лида из Bitrix24 (например, 167037):');
+  sendMessage(chatId, `✅ Вид объекта сохранён: <b>${userText}</b>\n${typeDescriptions[userText]}\n\n🔢 Введите ID лида из Bitrix24 (например, 167037):`);
   return;
 }
 
@@ -564,9 +630,13 @@ function showReplyKeyboard(chatId, isAdmin = false) {
     keyboard.push([{ text: "🔁 Вернуть лид в колл-центр" }]);
   }
 
-  if (isAdmin || chatId in ALLOWED_ADMINS) {
-    keyboard.push([{ text: "🗂 Архивировать данные" }]);
-  }
+  if (isAdmin || chatId in ARCHIVE_ACCESS) {
+  keyboard.push([{ text: "🗂 Архивировать данные" }]);
+}
+
+if (hasArchiveAccess(chatId)) {
+  keyboard.push([{ text: "📤 Выгрузка отчёта" }]);
+}
 
   sendMessage(chatId, '📋 Главное меню:', {
     keyboard: keyboard,
@@ -657,9 +727,6 @@ function answerCallbackQuery(callbackId) {
   });
 }
 
-function getTodayISO() {
-  return Utilities.formatDate(new Date(), SpreadsheetApp.getActive().getSpreadsheetTimeZone(), 'yyyy-MM-dd');
-}
 
 function updateManagerStatusInQueue(userId, status) {
   const name = (ALLOWED_USERS[userId] || '').trim();
